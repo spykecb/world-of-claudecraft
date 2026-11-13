@@ -2816,8 +2816,7 @@ export class Renderer {
     // Crafting-station scenery (Professions 2.0): static, except the kitchens
     // fire, whose flame + light join the campfire flicker/ember pass above.
     const stationProps = buildStationProps(this.sim.cfg.seed, this.sim.stationPlacements);
-    setRenderCategory(stationProps.group, 'props');
-    this.scene.add(stationProps.group);
+    this.attachZoneFeature(stationProps, false); // a fog-cull group per hub cell, no band bake
     freezeStaticMatrices(stationProps.group);
     for (const flame of stationProps.flames) flame.matrixAutoUpdate = true;
     this.flames.push(...stationProps.flames);
@@ -2827,8 +2826,7 @@ export class Renderer {
     // The garden beds and compost bins: static world furniture EVERY viewer
     // sees, whatever they have planted (the per-viewer crops mount later).
     const farmPatchProps = buildFarmPatchProps(this.sim.cfg.seed, this.sim.farmPatches);
-    setRenderCategory(farmPatchProps.group, 'props');
-    this.scene.add(farmPatchProps.group);
+    this.attachZoneFeature(farmPatchProps, false); // a fog-cull group per patch, no band bake
     freezeStaticMatrices(farmPatchProps.group);
     this.farmBedSeats = farmPatchProps.seats;
     bd('stations');

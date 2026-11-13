@@ -1067,7 +1067,9 @@ const MONOLITHS: MonolithRow[] = [
     // Lowered after moving the zone feature cull-group registration into
     // zone_feature_sweep.ts (zoneFeatureEntriesFor) beside the idle-sliced
     // feature prebuild wiring (zone_feature_builds.ts). Exact count.
-    ceiling: 12180,
+    // Lowered again when station props and farm patches moved onto
+    // attachZoneFeature (one call instead of category, add). Exact count.
+    ceiling: 12178,
     seam: 'a new src/render/<thing>.ts module the renderer calls (src/render/CLAUDE.md)',
   },
   {
