@@ -184,7 +184,21 @@ export function propCullReveal(
   if (!inFog) return 'hidden';
   if (state.revealed) return 'revealed';
   if (!gate) return 'revealed';
-  if (boxDistSq <= PROP_CULL_REVEAL_REACH * PROP_CULL_REVEAL_REACH) return 'revealed';
+  if (boxDistSq <= PROP_CULL_REVEAL_REACH * PROP_CULL_REVEAL_REACH) {
+    // Revealed at arm's length whatever the gate says (the fairness floor),
+    // but the consult still REQUESTS the band's compile. This cull
+    // is by distance, not by view, so a band inside the reach that three's
+    // frustum cull has not drawn yet (behind the camera) would otherwise link
+    // at the first frame a camera turn puts it on screen: measured on the
+    // reference phone, whose gates run deferred, the street lamps beside the
+    // town spot linked live on the first turn after 20 s of standing there.
+    // With the request they link while the player stands. Once, because the
+    // band latches `revealed` and is never consulted again. NOT imminent: the
+    // band is already drawn, so it must not count as a held key the arrival
+    // cover waits on, nor outrank the keys the camera is actually among.
+    gate.allow(state.key, false);
+    return 'revealed';
+  }
   const imminent = propCullConsultImminent(inFog, boxDistSq, fogFar, state, gate);
   return gate.allow(state.key, imminent) ? 'revealed' : 'held';
 }

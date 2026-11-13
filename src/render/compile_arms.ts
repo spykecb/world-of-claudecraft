@@ -11,6 +11,16 @@
 
 import type * as THREE from 'three';
 import { linkAcrossContextLoss } from './context_generation';
+import { awaitLinkFence, type LinkFenceGl } from './link_fence_proof';
+import {
+  linkFrameUsed,
+  linkPacingActive,
+  linkSlot,
+  noteLink,
+  passLinkSlot,
+  setLinkPacingEnabled,
+} from './link_slot_pacer';
+import { type LinkLane, type PacedLinkHost, pacedCompile } from './paced_link_core';
 import { prewarmDepthMaterial } from './prewarm_depth_material';
 
 /** The renderer surface both arms drive. `compileAsync` is the link; the
@@ -23,6 +33,9 @@ export interface CompileArmRenderer {
     camera: THREE.Camera,
     targetScene?: THREE.Scene | null,
   ): Promise<THREE.Object3D>;
+  /** The program list, read by the deferred-mode pacing to see whether a
+   *  compile linked anything. */
+  info?: { programs?: readonly unknown[] | null };
 }
 
 /** The game context's own contract, as the shader warm worker needs it
@@ -70,6 +83,93 @@ export type CompileArmOp<T> = (root: THREE.Object3D, camera: THREE.Camera, scene
 export type CompileArmObserver = (root: THREE.Object3D, arm: 'color' | 'shadow') => void;
 
 let armObserver: CompileArmObserver | null = null;
+
+/** Deferred link-gate mode (link_gate_mode_core.ts): each arm compile runs
+ *  under the frame rule (paced_link_core.ts) and resolves only once a fence
+ *  issued behind it signals (link_fence_proof.ts). Called by every Renderer
+ *  constructor, so a second renderer in the page (the editor, a rebuild)
+ *  starts disarmed and with its own mode. */
+let fenceProof = false;
+let pacingOwner: object | null = null;
+export function setCompileArmLinkPacing(
+  on: boolean,
+  owner: object | null = null,
+  fences = on,
+): void {
+  pacingOwner = owner;
+  fenceProof = on && fences;
+  outstandingFence = null;
+  setLinkPacingEnabled(on);
+}
+
+/** A renderer going away: stand the pacing down and release its parked
+ *  compiles, unless a newer renderer already took the pacer over. */
+export function releaseCompileArmLinkPacing(owner: object): void {
+  if (pacingOwner !== owner) return;
+  setCompileArmLinkPacing(false);
+}
+
+const PACER: PacedLinkHost = {
+  paced: linkPacingActive,
+  frameUsed: linkFrameUsed,
+  slot: linkSlot,
+  noteLink,
+  passSlot: passLinkSlot,
+};
+
+/** Run one arm compile under the frame rule and await it. `issue` is the
+ *  synchronous prologue (three's compileAsync call, made under the arm's
+ *  state, which is restored before it returns); its promise is awaited here,
+ *  after the state is restored, as the unpaced arms always did. In deferred
+ *  mode, once the world is revealed and no arrival cover is up, the fence is
+ *  issued in the same synchronous step, directly behind the compile's links,
+ *  and the arm settles only on its signal: three's own answer is an
+ *  unconditional true on such a context (link_fence_proof.ts). */
+async function pacedArmCompile<T>(
+  host: CompileArmHost,
+  issue: () => T,
+  lane: LinkLane,
+): Promise<Awaited<T>> {
+  const webgl = host.webgl();
+  let fence: Promise<unknown> | null = null;
+  const result = await pacedCompile(
+    PACER,
+    () => {
+      const before = webgl.info?.programs?.length ?? 0;
+      const value = issue();
+      const created = Math.max(0, (webgl.info?.programs?.length ?? 0) - before);
+      // In the world only: under the loading screen a fence per unit would
+      // stall the submission behind every link, so the boot compile waits on
+      // ONE fence behind all of its units instead (renderer.ts
+      // programs.compile).
+      if (fenceProof && linkPacingActive()) fence = linkProof(host, created);
+      return { value, created };
+    },
+    lane,
+  );
+  const value = await result.value;
+  if (fence) await fence;
+  return value;
+}
+
+/** The newest fence still pending, issued behind the latest in-world link. */
+let outstandingFence: Promise<unknown> | null = null;
+
+/** A compile that linked issues a fence behind its links. A cache hit issues
+ *  none: the program it hit may still be linking for another caller, so it
+ *  waits on the newest outstanding fence instead (fences signal in order, so
+ *  that one covers every earlier link), and on nothing once all have
+ *  signalled. Measured on the desktop proxy: a fence per hit made the reveal
+ *  queue's 300 mostly-cached pieces drain at 60 to 100 a second. */
+function linkProof(host: CompileArmHost, created: number): Promise<unknown> | null {
+  if (created === 0) return outstandingFence;
+  const fence = awaitLinkFence(host.context?.() as LinkFenceGl | null | undefined);
+  outstandingFence = fence;
+  void fence.then(() => {
+    if (outstandingFence === fence) outstandingFence = null;
+  });
+  return fence;
+}
 
 export function setCompileArmObserver(observer: CompileArmObserver | null): void {
   armObserver = observer;
@@ -120,14 +220,20 @@ export async function linkColorPrograms(
   host: CompileArmHost,
   root: THREE.Object3D,
   includeOffscreenVariant: boolean,
+  lane: LinkLane = 'gate',
 ): Promise<void> {
   armObserver?.(root, 'color');
   // A link that straddled a context loss is linked again on the live context
   // (context_generation.ts): its first answer proves nothing there.
   await linkAcrossContextLoss(host.webgl(), async () => {
     for (const target of colorArmTargets(host, includeOffscreenVariant)) {
-      await underRenderTarget(host, target, () =>
-        host.webgl().compileAsync(root, host.camera(), host.scene()),
+      await pacedArmCompile(
+        host,
+        () =>
+          underRenderTarget(host, target, () =>
+            host.webgl().compileAsync(root, host.camera(), host.scene()),
+          ),
+        lane,
       );
     }
   });
@@ -223,13 +329,19 @@ export function runShadowArm<T>(
 export async function linkShadowPrograms(
   host: CompileArmHost,
   root: THREE.Object3D,
+  lane: LinkLane = 'gate',
 ): Promise<void> {
   await linkAcrossContextLoss(host.webgl(), async () => {
     // Told inside the arm, so a root with nothing to link announces nothing.
-    const link = runShadowArm(host, root, (target, camera, scene) => {
-      armObserver?.(root, 'shadow');
-      return host.webgl().compileAsync(target, camera, scene);
-    });
-    if (link) await link;
+    // A null arm (nothing to prepare) resolves to null at once.
+    await pacedArmCompile(
+      host,
+      () =>
+        runShadowArm(host, root, (target, camera, scene) => {
+          armObserver?.(root, 'shadow');
+          return host.webgl().compileAsync(target, camera, scene);
+        }),
+      lane,
+    );
   });
 }

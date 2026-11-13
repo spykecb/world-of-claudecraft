@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { detectBrowserEngine } from '../game/browser_env';
 import { CAM_PITCH_UP } from '../game/input';
 import { NumberSampleRing } from '../game/sample_ring';
 import { coerceFxTier, nameplateIntervalSec, nameplatePixelRatio } from '../game/ui_tier_knobs';
@@ -272,7 +273,13 @@ import { fogFarForBuiltGround, groundViewConeHalfAngle } from './chunk_residency
 import { buildCityClutter, type CityClutterView } from './city_clutter';
 import { CLICK_MARKER_LIFETIME } from './click_marker';
 import { buildCliffScree, type CliffScreeView } from './cliff_scree';
-import { type CompileArmHost, linkColorPrograms, linkShadowPrograms } from './compile_arms';
+import {
+  type CompileArmHost,
+  linkColorPrograms,
+  linkShadowPrograms,
+  releaseCompileArmLinkPacing,
+  setCompileArmLinkPacing,
+} from './compile_arms';
 import type { CompileGateResult } from './compile_gate';
 import { CompileGateQueue, SerialGateLane, settlePendingSwap } from './compile_gate';
 import { linkPieceWork } from './compile_gate_pieces';
@@ -519,11 +526,14 @@ import { buildJungleFeatures, type JungleFeaturesView } from './jungle_features'
 import { legendaryRegaliaActive, legendaryRegaliaEmitDt } from './legendary_regalia_core';
 import { stepLichHeartbeat } from './lich_audio_state_core';
 import { LightPulses, lightPulsePoolSize } from './light_pulses';
+import { awaitLinkFence, linkFenceStats } from './link_fence_proof';
+import { type LinkGateMode, resolveLinkGateMode } from './link_gate_mode_core';
 import {
   createPrewarmPacing,
   markPrewarmPacingReveal,
   type PrewarmPacingHandle,
 } from './link_rate_budget';
+import { armLinkPacing, linkPacingStats } from './link_slot_pacer';
 import { liveMaterialProperties } from './linked_program_touch';
 import { runWorldGateTouchLane } from './linked_program_touch_lane';
 import { diffComposedLook, diffWornArmor } from './live_look_diff';
@@ -611,6 +621,7 @@ import {
   lowSunIntensity,
   terrainFillBoostTarget,
 } from './outdoor_light_rig_core';
+import type { LinkLane } from './paced_link_core';
 import { buildPlacedTownViews, type PlacedTownView } from './painted_towns';
 import {
   PALADIN_AEGIS_DOME_RADIUS,
@@ -737,6 +748,8 @@ import {
 } from './render_budget';
 import {
   gpuPrepMode,
+  linkFenceDisabled,
+  linkGateOverride,
   postShedLevelPin,
   renderLayerDisabled,
   terrainDetailLevelPin,
@@ -1984,6 +1997,9 @@ export class Renderer {
   // KHR_parallel_shader_compile present: lets us link new programs off-thread and
   // gate a freshly-streamed view's draw on readiness instead of stalling the frame.
   private asyncCompileSupported = false;
+  // The first-sight gates also run without it, deferred, on Chromium (link_gate_mode_core.ts).
+  private compileGatesSupported = false;
+  private linkGateMode: LinkGateMode = 'none';
   private readonly liveCompileGates = new CompileGateQueue(this.backgroundGpuWork);
   vfx: Vfx;
   // Thornhollow Fields flag/rune per-frame dressing + transition bursts; runs off
@@ -2278,11 +2294,19 @@ export class Renderer {
     // The context's whole extension set, enabled before the first program links
     // (renderer_extensions.ts); view draws gate on compileAsync only off-thread.
     try {
-      this.asyncCompileSupported =
-        typeof this.webgl.compileAsync === 'function' &&
-        enableAndWatchRendererExtensions(this.webgl).parallelCompile;
+      this.linkGateMode = resolveLinkGateMode({
+        compileAsync: typeof this.webgl.compileAsync === 'function',
+        parallelExtension: enableAndWatchRendererExtensions(this.webgl).parallelCompile,
+        engine: detectBrowserEngine(navigator.userAgent).engine,
+        override: linkGateOverride(),
+      });
+      this.asyncCompileSupported = this.linkGateMode === 'parallel';
+      this.compileGatesSupported = this.linkGateMode !== 'none';
+      setCompileArmLinkPacing(this.linkGateMode === 'deferred', this, !linkFenceDisabled());
     } catch {
       this.asyncCompileSupported = false;
+      this.compileGatesSupported = false;
+      setCompileArmLinkPacing(false, this);
     }
     // Vista tiers push the far plane out to the whole-world envelope so the
     // far mesh has room; the classic 950 stays wherever the vista is off.
@@ -2626,7 +2650,7 @@ export class Renderer {
     setRenderCategory(this.fish.group, 'fish');
     this.scene.add(this.fish.group);
     this.fish.setCompileGate(
-      this.asyncCompileSupported ? (root: THREE.Object3D) => this.compileGate(root) : null,
+      this.compileGatesSupported ? (root: THREE.Object3D) => this.compileGate(root) : null,
     );
     this.motes = buildMotes(this.sim.cfg.seed);
     setRenderCategory(this.motes.group, 'ambient');
@@ -2727,7 +2751,7 @@ export class Renderer {
     // A key's soft deadline comes from the budget's learned reveal cost: past
     // it the gate reports how much of the key linked and keeps waiting, so
     // only the hard watchdog ever reveals an unlinked root (reveal_gate.ts).
-    if (this.asyncCompileSupported) {
+    if (this.compileGatesSupported) {
       const revealHost = createRevealCompileHost({
         gate: (pieces, options, firstIndex) =>
           this.liveCompileGates.runPieces(pieces, VIEW_COMPILE_GATE_MAX_MS, options, firstIndex),
@@ -3090,7 +3114,7 @@ export class Renderer {
       this.scene,
       this.farmBedSeats,
       this.vfx,
-      this.asyncCompileSupported
+      this.compileGatesSupported
         ? (root, label, priority) => this.compileGate(root, false, label, priority)
         : null,
     );
@@ -3108,7 +3132,7 @@ export class Renderer {
       pixelRatio: () => this.webgl.getPixelRatio(), reducedMotion: () => this.reducedMotion(),
       audio: () => this.audioSink, light: this.lightPulses,
       spiritBuild: (build) => this.queueSpiritPuppetBuild(build),
-      compile: this.asyncCompileSupported ? (root) => this.compileGate(root) : null,
+      compile: this.compileGatesSupported ? (root) => this.compileGate(root) : null,
       castGate: this.castVfxReadiness,
       painter: {
         spawnAoeRing: (x, z, r, school, color) => this.spawnAoeRing(x, z, r, school, color),
@@ -4491,6 +4515,7 @@ export class Renderer {
       renderDiagnostics: this.lastFrameStats.renderDiagnostics,
       lastFrame: snapshotRendererFrameStats(this.lastFrameStats),
       prewarm: this.lastPrewarmStats,
+      linkGate: { mode: this.linkGateMode, ...linkPacingStats(), fence: linkFenceStats() },
       castVfx: this.castVfxReadiness.snapshot(),
       entryDetailHorizon: this.entryDetailHorizon.snapshot(),
       gpuQueue: this.backgroundGpuWork.stats(),
@@ -4507,6 +4532,7 @@ export class Renderer {
     this.gpuHitchCompileLifecycle?.markReveal();
     markPrewarmPacingReveal(this.gpuHitchPacing, this.lastPrewarmStats);
     liveProgramWatch.armLiveProgramWatch(this.webgl);
+    armLinkPacing();
   }
 
   /** Contract the entry-only detail field while the loading cover still owns presentation. */
@@ -4916,7 +4942,7 @@ export class Renderer {
   private readonly farBakeGate: FarBakeGate = (target, onSettled) =>
     this.farBakeLane.enqueue(
       (settled) => this.gateSwapFlagOnCompile(target, settled),
-      () => onSettled(compileProof(this.asyncCompileSupported, this.webgl, target)),
+      () => onSettled(compileProof(this.compileGatesSupported, this.webgl, target)),
     );
 
   /** buildFormVisual as one stable callback (no per-frame closure). */
@@ -5252,7 +5278,7 @@ export class Renderer {
         return this.prewarmRenderTarget;
       },
       depthMaterials: () => this.prewarmDepthMaterials,
-      shadowArm: () => GFX.dynamicShadows && this.asyncCompileSupported,
+      shadowArm: () => GFX.dynamicShadows && this.compileGatesSupported,
     };
     this.compileArmHost = host;
     return host;
@@ -5262,8 +5288,9 @@ export class Renderer {
   private compilePrewarmColorPrograms(
     root: THREE.Object3D,
     includeOffscreenVariant: boolean,
+    lane: LinkLane = 'gate',
   ): Promise<void> {
-    return linkColorPrograms(this.compileArms, root, includeOffscreenVariant);
+    return linkColorPrograms(this.compileArms, root, includeOffscreenVariant, lane);
   }
 
   /** Link the depth twins of every mesh under the root, under the shadow
@@ -5430,6 +5457,7 @@ export class Renderer {
     const policy: PrewarmPolicy = resolvePrewarmPolicy({
       constrainedMemory: GFX.constrainedMemory,
       asyncCompileSupported: this.asyncCompileSupported,
+      deferredLinkCompile: this.linkGateMode === 'deferred',
       lowGfx: this.lowGfx,
       finishFullManifestBeforeReveal: GFX.tier === 'insane' && !GFX.constrainedMemory,
       defaultMaxMs: VIEW_PREWARM_MAX_MS,
@@ -5601,6 +5629,7 @@ export class Renderer {
     this.gpuHitchCompileLifecycle = compileLifecycle;
     let vfxPrewarmBursts = 0;
     let compileMode: RendererPrewarmStats['compileMode'] = 'none';
+    let fenceDetail = '';
     let compileMs = 0;
     let compileTimedOut = false;
     const budgetVariantStats: NonNullable<RendererPrewarmManifestEntryStats['budgetVariants']> = [];
@@ -5668,7 +5697,8 @@ export class Renderer {
         playerZ: this.sim.player.pos.z,
         batchSize: compileBatchRoots,
         sharedDedupe: compileDedupe,
-        compileColor: (root) => this.compilePrewarmColorPrograms(root, false),
+        // A bulk lane once resumed: in deferred mode a waiting gate links first.
+        compileColor: (root) => this.compilePrewarmColorPrograms(root, false, 'bulk'),
         compileShadow: (root) => this.compileShadowPrograms(root),
         onCompiledRoot: () => compiledPrewarmRoots++,
         tail: entryCompileTail(this.webgl, this.prewarmDepthMaterials, this.backgroundGpuWork),
@@ -6293,7 +6323,7 @@ export class Renderer {
         priority: 46,
         required: false,
         run: async () => {
-          if (policy.skipMonolithCompile || !this.asyncCompileSupported) return;
+          if (policy.skipMonolithCompile || !this.compileGatesSupported) return;
           await submitCompileUnits(false, gpuSubmitDeadline, 'programs.compile-submit');
         },
         detail: () =>
@@ -6629,7 +6659,10 @@ export class Renderer {
         // a synchronous traversal, so the live resume lane must never receive
         // this.scene or another whole manifest entry.
         resumeUnits: () => {
-          if (!this.asyncCompileSupported || !this.webgl.compileAsync) return [];
+          // Deferred mode resumes too: its units link through the paced arms
+          // (paced_link_core.ts), one linking compile per frame, so the static
+          // scene the camera has not faced yet links before the first turn.
+          if (!this.compileGatesSupported || !this.webgl.compileAsync) return [];
           deferPoolPublication = poolsAwaitPublication();
           // Already-submitted groups are in flight off-thread; resuming them
           // would double-submit every unit. Only the never-submitted remainder
@@ -6707,6 +6740,14 @@ export class Renderer {
             sleep(budgetMs).then(() => 'timeout' as const),
           ]);
           if (outcome === 'timeout') compileTimedOut = true;
+          // Deferred mode: the units above settled on three's unconditional
+          // true while their links still queue in the GPU process. One fence
+          // behind them all lands that backlog here, under the cover, never on
+          // the first live frame (link_fence_proof.ts).
+          if (this.linkGateMode === 'deferred' && !linkFenceDisabled()) {
+            const fence = await awaitLinkFence(this.webgl.getContext());
+            fenceDetail = `;fence=${fence.proved ? 'proved' : 'unproved'}:${roundMs(fence.waitedMs)}`;
+          }
           compileMs = roundMs(performance.now() - compileStart);
           compileTimedOut ||= compileMs > policy.compileMaxMs;
         },
@@ -6726,6 +6767,7 @@ export class Renderer {
             : null,
         detail: () =>
           `mode=${compileMode};timedOut=${compileTimedOut};compileRoots=${compiledPrewarmRoots}` +
+          fenceDetail +
           (compileUnitsDropped > 0 ? `;deferred=${compileUnitsDropped}` : ''),
       },
       {
@@ -7091,7 +7133,7 @@ export class Renderer {
         `views=${stats.createdViews}/${stats.candidateViews} ` +
         `programs=${stats.programsBefore}->${stats.programsAfter} ` +
         `textures=${stats.texturesBefore}->${stats.texturesAfter} uploads=${stats.textureUploads} ` +
-        `compile=${stats.compileMode}/${stats.compileMs}ms parallelCompile=${this.asyncCompileSupported} ` +
+        `compile=${stats.compileMode}/${stats.compileMs}ms parallelCompile=${this.asyncCompileSupported} linkGate=${this.linkGateMode} ` +
         `skipped=${stats.manifestSkipped} partial=[${stats.partialEntryIds.join(',')}] ` +
         `timedOut=[${stats.timedOutEntryIds.join(',')}] ` +
         `failed=[${stats.failedEntryIds.join(',')}]`,
@@ -8302,7 +8344,7 @@ export class Renderer {
     visibilityTarget: THREE.Object3D = group,
     requiredForEntry = false,
   ): Promise<void> | null {
-    if (!this.asyncCompileSupported) return null;
+    if (!this.compileGatesSupported) return null;
     const generation = this.lifecycleGeneration;
     const priorVisibility = visibilityTarget.visible;
     const gatesOnlyCharacterRig = visibilityTarget !== group;
@@ -8341,7 +8383,7 @@ export class Renderer {
   // payload, once attached, is left alone); for one the per-frame loop
   // recomputes every tick, use gateSwapFlagOnCompile instead.
   private gateSwapOnCompile(target: THREE.Object3D): void {
-    if (!this.asyncCompileSupported || !target.visible) return;
+    if (!this.compileGatesSupported || !target.visible) return;
     const generation = this.lifecycleGeneration;
     target.visible = false;
     void this.compileGate(target).then(
@@ -8367,7 +8409,7 @@ export class Renderer {
   // run when the gate is a no-op (unsupported browser): otherwise the flag is
   // permanently stuck true and the target stays hidden forever.
   private gateSwapFlagOnCompile(target: THREE.Object3D, onSettled: () => void): void {
-    if (!this.asyncCompileSupported) {
+    if (!this.compileGatesSupported) {
       onSettled();
       return;
     }
@@ -8701,7 +8743,7 @@ export class Renderer {
       this.lowGfx,
       this.flames,
       this.fireLightAdopter.sink,
-      this.asyncCompileSupported ? (target) => this.compileGate(target) : undefined,
+      this.compileGatesSupported ? (target) => this.compileGate(target) : undefined,
       // The raw registry + rank hook, for the world editor's keyed interior
       // rebuild only (see the DungeonInteriors constructor): a release has to
       // splice, which the append-only sink above cannot express.
@@ -9372,7 +9414,7 @@ export class Renderer {
    *  Only visibility flags, so this is cheap enough for the per-frame block. */
   /** The gate a streamed world group attaches through; none without parallel compile. */
   worldCompileGate(): ((target: THREE.Object3D) => Promise<unknown>) | undefined {
-    return this.asyncCompileSupported ? (target) => this.compileGate(target) : undefined;
+    return this.compileGatesSupported ? (target) => this.compileGate(target) : undefined;
   }
 
   /** What battleground_views.ts needs to build and attach a field copy. Its lights
@@ -11887,6 +11929,8 @@ export class Renderer {
   /** Release host-owned workers, overlay canvases, and document listeners. */
   dispose(): void {
     setBuildSpanSink(null);
+    // Release every compile parked on the link pacer (link_slot_pacer.ts).
+    releaseCompileArmLinkPacing(this);
     this.cancelTerrainStreaming();
     this.localVisuals.dispose();
     this.nameplatePainter.dispose();

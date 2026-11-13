@@ -175,7 +175,8 @@ export function spiritVeilProgramUnits(
   claimLedger: () => void,
   touches?: Promise<unknown>[],
 ): PrewarmResumeUnit[] {
-  const link = host.link ?? ((root) => linkColorPrograms(host.arms, root, false));
+  // A bulk lane: in deferred mode a waiting reveal links first.
+  const link = host.link ?? ((root) => linkColorPrograms(host.arms, root, false, 'bulk'));
   return SPIRIT_VEIL_FAMILY.map((tuple) => {
     const key = spiritVeilKeyOfTuple(tuple);
     const root = standInFor(tuple);

@@ -248,10 +248,28 @@ describe('prop cull first-reveal policy', () => {
     expect(requested).toEqual(['cull:5']);
     // The floor also covers a first consult under a tightly clamped fog,
     // where half the fog would be a few yards: band at 30 under fogFar 45.
+    // It reveals at once AND requests its compile, so a band at arm's length
+    // that the camera is not facing links before the camera turns to it.
     const clamped = cullable(box(30, 130, -50, 50), 'cull:6');
     updatePropCullable(clamped, 0, 0, 45, 45 * 45, gate);
     expect(clamped.obj.visible).toBe(true);
-    expect(requested).toEqual(['cull:5']);
+    expect(requested).toEqual(['cull:5', 'cull:6']);
+    // Revealed and latched: the gate is never consulted for it again.
+    updatePropCullable(clamped, 0, 0, 45, 45 * 45, gate);
+    expect(requested).toEqual(['cull:5', 'cull:6']);
+  });
+
+  it('requests a reach-floor band NOT imminent, so no cover waits on it', () => {
+    // The band is already drawn: an imminent request would count it as a key
+    // the arrival cover waits on and rank it beside the keys the camera is
+    // actually among.
+    const requested: { key: string; imminent: boolean }[] = [];
+    const gate = createRevealGateCore((key, imminent) => requested.push({ key, imminent }));
+    const c = cullable(box(30, 130, -50, 50), 'cull:8');
+    updatePropCullable(c, 0, 0, 45, 45 * 45, gate);
+    expect(c.obj.visible).toBe(true);
+    expect(requested).toEqual([{ key: 'cull:8', imminent: false }]);
+    expect(gate.heldImminentKeys()).toBe(0);
   });
 
   it('keeps the historical immediate cull without a gate', () => {

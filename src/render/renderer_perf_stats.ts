@@ -174,6 +174,17 @@ export interface RendererPerfStats {
   renderDiagnostics: RenderDiagnosticsSnapshot;
   lastFrame?: RendererFrameStats;
   prewarm: RendererPrewarmStats | null;
+  /** Compile-gate mode (link_gate_mode_core.ts: deferred on Chromium without
+   *  parallel compile) and the deferred mode's link pacing (link_slot_pacer.ts). */
+  linkGate?: {
+    mode: 'parallel' | 'deferred' | 'none';
+    active: boolean;
+    waiting: number;
+    links: number;
+    waits: number;
+    /** Deferred mode's link proof (link_fence_proof.ts). */
+    fence?: { fences: number; proved: number; unproved: number; maxWaitMs: number };
+  };
   castVfx: CastVfxReadinessSnapshot;
   entryDetailHorizon: EntryDetailHorizonSnapshot;
   gpuQueue: BackgroundGpuQueueStats;

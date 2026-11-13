@@ -177,6 +177,19 @@ export interface GpuWorkRunOptions {
   releaseTail?: boolean;
 }
 
+function pendingKinds(
+  pending: readonly { label: string; priority: number }[],
+): Array<{ kind: string; priority: number; count: number }> {
+  const kinds = new Map<string, { kind: string; priority: number; count: number }>();
+  for (const unit of pending) {
+    const kind = unit.label.split(':')[0] ?? unit.label;
+    const entry = kinds.get(kind);
+    if (entry) entry.count++;
+    else kinds.set(kind, { kind, priority: unit.priority, count: 1 });
+  }
+  return [...kinds.values()].sort((a, b) => b.count - a.count).slice(0, 8);
+}
+
 interface PendingGpuWork<T> {
   order: number;
   priority: number;
@@ -340,6 +353,9 @@ export interface BackgroundGpuQueueStats {
   /** Units not started yet, waiting on the running unit or on the
    *  released-tail cap: the backlog a wedge accumulates. */
   pending: number;
+  /** The same backlog by label kind (the label up to its first colon, with
+   *  its priority), the eight largest: which lane a wedge belongs to. */
+  pendingByKind?: Array<{ kind: string; priority: number; count: number }>;
   /** The unit holding the drain loop, or null when nothing does. A released
    *  tail is NOT active: it appears in waitingTails until it settles. */
   active: GpuWorkActiveUnit | null;
@@ -1029,6 +1045,7 @@ export function createBackgroundGpuQueue(opts?: {
         slowest: slowest.map(reportUnit),
         blockiest: blockiest.map(reportUnit),
         pending: pending.length,
+        pendingByKind: pendingKinds(pending),
         active: activeUnit,
         waitingTails: tailUnits,
         stallCount,
