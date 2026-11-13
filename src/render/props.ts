@@ -1110,6 +1110,18 @@ export function buildPropMaterialPrewarmGroup(): THREE.Group {
   }
   // ...and a sailing ship's wake and bow splash (ship_wake.ts): one points program
   for (const points of shipWakePrewarmParts()) place(points);
+  // ...and both kinds of live flame the props view culls by distance (prop_cull_core
+  // livePropCullTargets): a culled fire no longer links at entry from across the world,
+  // so the built-in world's legacy lathe and the shader flame with its core link here,
+  // each from its own builder so every program-key input matches the live one
+  place(
+    buildLegacyCampfireFlame(legacyCampfireFlameGeometry(), {
+      color: 0xffaa33,
+      emissive: 0xff6600,
+      emissiveIntensity: 1.4,
+    }),
+  );
+  place(buildCampfireFlame().flame);
   return group;
 }
 

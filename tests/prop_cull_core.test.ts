@@ -418,20 +418,29 @@ function fogFarNearEdge(fogFar: number): number {
 }
 
 describe('live props meshes no hideable carries', () => {
-  const node = (parent: PropLiveNode | null, userData: Record<string, unknown> = {}) => ({
-    parent,
-    userData,
-  });
+  const node = (parent: PropLiveNode | null): PropLiveNode => ({ parent });
 
-  it('selects legacy flames outside every hideable, and only those', () => {
+  it('selects the flames outside every hideable, and only those', () => {
     const root = node(null);
     const hideable = node(root);
     const holder = node(root);
-    const free = node(holder, { legacyFlame: true }); // a tavern hearth: under a plain holder
-    const inCampfire = node(node(hideable), { legacyFlame: true }); // a campfire's own flame
-    const newKind = node(root); // a campfire-flame body: no prewarm twin yet
-    const picked = livePropCullTargets([free, inCampfire, newKind], new Set([hideable]), root);
-    expect(picked).toEqual([free]);
+    const tavernHearth = node(holder); // under a plain holder
+    const guildHearth = node(node(holder)); // a flame body under its holder's group
+    const inCampfire = node(node(hideable)); // a campfire's own flame: its campfire culls it
+    const picked = livePropCullTargets(
+      [tavernHearth, inCampfire, guildHearth],
+      new Set([hideable]),
+      root,
+    );
+    expect(picked).toEqual([tavernHearth, guildHearth]);
+  });
+
+  it('every flame the cull may hide has a prewarm twin built by its own builder', () => {
+    const src = readFileSync(new URL('../src/render/props.ts', import.meta.url), 'utf8');
+    const prewarm = src.slice(src.indexOf('export function buildPropMaterialPrewarmGroup('));
+    const body = prewarm.slice(0, prewarm.indexOf('\n}\n'));
+    expect(body).toMatch(/place\(\s*buildLegacyCampfireFlame\(legacyCampfireFlameGeometry\(\)/);
+    expect(body).toMatch(/place\(buildCampfireFlame\(\)\.flame\);/);
   });
 
   it('hides a mesh at or past the structure fog plus its slack, and shows it inside', () => {

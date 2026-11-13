@@ -291,8 +291,9 @@ export function updatePropCullables(
 // ---- live meshes no hideable carries -------------------------------------
 // The props root keeps some meshes live and unmerged (animated flames), and a
 // live mesh outside every hideable had no cull at all: the Mirefen tavern's
-// hearth and wall fires and the delve braziers drew from anywhere in the world
-// (a town frame on Low drew them from 420 to 520 yd, far past the fog). These
+// hearth and wall fires, the delve braziers and the Highwatch guild's hearths
+// drew from anywhere in the world (a town frame on Low drew them from 420 to
+// 750 yd, far past the fog). These
 // cull like a hideable does, by plain distance against the structure fog far.
 
 /** Reach past the structure fog far at which a live prop mesh stops drawing. */
@@ -308,17 +309,14 @@ export interface PropLiveCullable {
 /** The slice of a scene node the target selection reads. */
 export interface PropLiveNode {
   readonly parent: PropLiveNode | null;
-  readonly userData: { readonly [key: string]: unknown };
 }
 
 /**
- * The live flames the distance cull should own: the built-in world's legacy
- * lathe flames (`userData.legacyFlame`, one Lambert program every campfire at
- * entry already links, so a first reveal links nothing) that sit under no
+ * The live flames the distance cull should own: every flame that sits under no
  * hideable group up to `root` (a hideable's own cull already drops those, and a
- * flame must never hide while its structure draws). The other flame kinds wait
- * for a prewarm twin: culling them would move their link from entry to the
- * first approach.
+ * flame must never hide while its structure draws). Both flame kinds the props
+ * view keeps live have a twin in buildPropMaterialPrewarmGroup, so a flame's
+ * first reveal on an approach links nothing.
  */
 export function livePropCullTargets<T extends PropLiveNode>(
   flames: readonly T[],
@@ -327,7 +325,6 @@ export function livePropCullTargets<T extends PropLiveNode>(
 ): T[] {
   const out: T[] = [];
   for (const flame of flames) {
-    if (flame.userData.legacyFlame !== true) continue;
     let carried = false;
     for (let o = flame.parent; o && o !== root; o = o.parent) {
       if (hideableGroups.has(o)) {
