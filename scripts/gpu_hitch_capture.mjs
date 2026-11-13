@@ -936,7 +936,13 @@ export async function capture(args) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare resolved paths, not URL strings: on Windows `file://${argv[1]}` is
+// `file://C:...` while import.meta.url is `file:///C:/...`, so the string
+// compare never matched there and the CLI silently did nothing.
+if (
+  process.argv[1] &&
+  path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1])
+) {
   try {
     const args = parseArgs(process.argv.slice(2));
     if (args.help) {

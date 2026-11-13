@@ -52,8 +52,21 @@ export async function enterOfflineGame(page, opts = {}) {
     .evaluate(() => localStorage.setItem('woc.cameraModePrompt.shown', '1'))
     .catch(() => {});
   // Hidden legacy hook: fire its handler in-page rather than page.click (no clickable point).
-  await page.evaluate(() => document.querySelector('#btn-offline')?.click());
-  await page.waitForSelector(card, { visible: true, timeout: selectorTimeoutMs });
+  // The button is static HTML, so it exists before the client wires its handler, and on a
+  // bundled build a click that early is lost: click again every 2 s until the select opens.
+  const deadline = Date.now() + selectorTimeoutMs;
+  for (;;) {
+    await page.evaluate(() => document.querySelector('#btn-offline')?.click());
+    const remaining = deadline - Date.now();
+    const opened = await page
+      .waitForSelector(card, { visible: true, timeout: Math.max(1, Math.min(2000, remaining)) })
+      .then(() => true)
+      .catch(() => false);
+    if (opened) break;
+    if (Date.now() >= deadline) {
+      await page.waitForSelector(card, { visible: true, timeout: 1 });
+    }
+  }
   // Drive name / class / Enter World in-page too: on small touch viewports these can fail
   // puppeteer's clickable-point check, the same reason #btn-offline does.
   await page.evaluate((name) => {

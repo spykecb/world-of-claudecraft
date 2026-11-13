@@ -1127,13 +1127,15 @@ export class Profiler {
 
   // The rich measurement: collect raw frames for `ms`, then fold the perf report,
   // advanced frame stats (1%/0.1% lows, jank, stdev) and freeze attribution.
-  async sample({ ms = 4000, label = 'sample' } = {}) {
+  /** `until`, when given, ends the window instead of the fixed `ms` sleep (a walk
+   *  leg lasts until the player arrives). */
+  async sample({ ms = 4000, label = 'sample', until = null } = {}) {
     await this.page.evaluate((label) => {
       window.__prof.label = label;
       window.__game.perf.reset();
       window.__prof.start();
     }, label);
-    await sleep(ms);
+    await (until ? until() : sleep(ms));
     const raw = await this.page.evaluate(() => ({
       ...window.__prof.stop(),
       report: window.__game.perf.report(),

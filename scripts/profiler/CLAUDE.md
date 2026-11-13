@@ -24,6 +24,12 @@ metrics. Needs `npm run dev` (:5173); every `--mode online` run also needs
     during the window) so a residual compile is identifiable - i.e. what to prewarm.
   - `normalizeReport(report)` - flatten `window.__game.perf.report()` to a stable
     comparable set. `diffMetrics(before, after)` - A/B delta + better/worse verdict.
+- `android_target.mjs` - real-phone glue for any `Profiler` script: adb helpers,
+  USB tunnels, stay-awake, attaching to the phone's Chrome, Node-side replacements for
+  puppeteer's in-page waits (they stall over Android DevTools), the phone-only entry
+  helpers (the home-screen preflight before character select, late mode-select wiring),
+  and a per-run site-storage clear. Used by `scripts/orbit_bench.mjs`; every workaround
+  is explained in its header and in `docs/perf/camera-turn-optimization.md`.
 - `capability.mjs` - the fail-closed online-profiler `/api/status` capability
   handshake. It rejects old servers and realms without `ALLOW_DEV_COMMANDS=1`
   before registration or world entry.

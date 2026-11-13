@@ -5,6 +5,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const usage = `CPU profile window
 
@@ -137,7 +138,12 @@ function parseArgs(argv) {
   return args;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Resolved-path compare, not a URL string compare: on Windows `file://${argv[1]}`
+// never equals import.meta.url (`file:///C:/...`), so the CLI did nothing there.
+if (
+  process.argv[1] &&
+  path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1])
+) {
   try {
     const args = parseArgs(process.argv.slice(2));
     const profile = JSON.parse(fs.readFileSync(args.file, 'utf8'));
