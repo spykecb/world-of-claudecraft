@@ -102,6 +102,7 @@ import {
   type TransportShipView,
   transportShipPrewarmParts,
 } from './transport_ship';
+import { VisibleChildrenGroup } from './visible_children_group';
 import { buildWickharborHarbor, wickharborHarborPrewarmParts } from './wickharbor_harbor';
 import { buildWickharborWharf, wickharborWharfPrewarmParts } from './wickharbor_wharf';
 import { applySurfaceDetail, type WornFamilyPick, wornFamilyFor } from './worn_stone';
@@ -1427,7 +1428,10 @@ export function buildProps(
   livePropMeshMatKeys.clear();
   livePropInstancedMatKeys.clear();
   const seed = world.cfg.seed;
-  const group = new THREE.Group();
+  // Most of its children are distance-culled at any moment (794 of 1,004 in
+  // town on the phone proxy), and the stock walk visited all 3,000-odd nodes
+  // under them every frame; this one skips a hidden child's subtree.
+  const group = new VisibleChildrenGroup({ walkHiddenOnce: true });
   const flames: THREE.Mesh[] = [];
   // Meshes the far-cell bake must never absorb because the renderer animates
   // them live (campfire flames, windmill sails): baking one freezes its pose

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PooledObjectView } from '../src/render/ground_object_pool';
+import { HiddenSubtreeGroup } from '../src/render/visible_children_group';
 import {
   buildEntityPrewarmGroup,
   buildEntityPrewarmGroupSteps,
@@ -311,6 +312,12 @@ describe('buildObjectPrewarmGroup pooled copies and the point-light hide', () =>
 
 describe('zone prewarm rigs built one per idle slice off the gating path', () => {
   const MOB_IDS = ['forest_wolf', 'rare_oddity'];
+
+  it('builds every grid as a group whose walk skips its subtree while hidden', () => {
+    const host = makeHost(MOB_IDS);
+    expect(buildEntityPrewarmGroup(host, ZONE).group).toBeInstanceOf(HiddenSubtreeGroup);
+    expect(buildNpcPrewarmGroup(host, ZONE, NO_DEADLINE).group).toBeInstanceOf(HiddenSubtreeGroup);
+  });
 
   it('yields once per rig, so a slice holds at most one rig past its budget', () => {
     const steps = buildEntityPrewarmGroupSteps(makeHost(MOB_IDS), ZONE);

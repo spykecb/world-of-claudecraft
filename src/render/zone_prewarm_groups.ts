@@ -23,6 +23,7 @@ import {
   runBuildInSlices,
   type SteppedBuild,
 } from './stepped_build_core';
+import { HiddenSubtreeGroup } from './visible_children_group';
 
 const PREWARM_MOB_TEMPLATE_IDS = [
   'forest_wolf',
@@ -140,7 +141,7 @@ export function* buildEntityPrewarmGroupSteps(
   h: ZonePrewarmGroupHost,
   zone: ZoneDef,
 ): SteppedBuild<PrewarmGroup> {
-  const group = new THREE.Group();
+  const group = new HiddenSubtreeGroup();
   const pooled: { key: string; visual: CharacterVisual }[] = [];
   const p = h.sim.player;
   group.position.set(p.pos.x, p.pos.y, p.pos.z - 14);
@@ -211,7 +212,7 @@ export function* buildNpcPrewarmGroupSteps(
   zone: ZoneDef,
   deadline: number,
 ): SteppedBuild<NpcPrewarmGroup> {
-  const group = new THREE.Group();
+  const group = new HiddenSubtreeGroup();
   const pooled: { key: string; visual: CharacterVisual }[] = [];
   const p = h.sim.player;
   group.position.set(p.pos.x, p.pos.y, p.pos.z - 24);
@@ -273,7 +274,7 @@ export function buildPlayerPrewarmGroup(
   trimmed: boolean;
 } {
   const h = host as ZonePrewarmGroupHost;
-  const group = new THREE.Group();
+  const group = new HiddenSubtreeGroup();
   const p = h.sim.player;
   group.position.set(p.pos.x, p.pos.y, p.pos.z - 21);
   setRenderCategory(group, 'prewarm');
@@ -358,7 +359,7 @@ export function buildPlayerPrewarmGroup(
 
 export function buildObjectPrewarmGroup(host: object): THREE.Group {
   const h = host as ZonePrewarmGroupHost;
-  const group = new THREE.Group();
+  const group = new HiddenSubtreeGroup();
   const p = h.sim.player;
   group.position.set(p.pos.x, p.pos.y, p.pos.z - 17);
   setRenderCategory(group, 'prewarm');
