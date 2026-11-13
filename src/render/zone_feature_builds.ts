@@ -22,12 +22,16 @@ import { buildGaleFeaturesSteps } from './gale_features';
 import { idleSlot } from './idle_queue';
 import { buildJungleFeaturesSteps } from './jungle_features';
 import { buildRealmFloraSteps } from './realm_flora';
-import { runBuildInSlices, type SteppedBuild } from './stepped_build_core';
+import {
+  IDLE_SLICE_MS,
+  IDLE_SLICE_TIMEOUT_MS,
+  runBuildInSlices,
+  type SteppedBuild,
+} from './stepped_build_core';
 
-/** The longest piece of a prebuild per idle slot, and how long a slot may be
- *  waited for under sustained frame load (the terrain lane's values). */
-export const FEATURE_SLICE_MS = 6;
-export const FEATURE_IDLE_TIMEOUT_MS = 200;
+/** The lane's slice and idle-slot wait (stepped_build_core.ts). */
+export const FEATURE_SLICE_MS = IDLE_SLICE_MS;
+export const FEATURE_IDLE_TIMEOUT_MS = IDLE_SLICE_TIMEOUT_MS;
 
 /** The stepped builders per biome, by the builder name ensureZoneFeatures
  *  times them under. */

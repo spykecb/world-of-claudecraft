@@ -986,6 +986,7 @@ import {
   buildNpcPrewarmGroup,
   buildObjectPrewarmGroup,
   buildPlayerPrewarmGroup,
+  buildZonePrewarmGroups,
   PREWARM_MOB_POOL_COPIES,
   PREWARM_OBJECT_ITEM_IDS,
   PREWARM_OBJECT_POOL_COPIES,
@@ -3931,12 +3932,10 @@ export class Renderer {
       opts?.background === true,
       async (pacing) => {
         const zone = dungeon ? ({ ...zoneAt(x, z), id: zoneId } as ZoneDef) : zoneAt(x, z);
-        const deadline = performance.now() + 5000;
         const t0 = performance.now();
-        const mobPrewarm = buildEntityPrewarmGroup(this.zonePrewarmHost(), zone);
-        const npcPrewarm = buildNpcPrewarmGroup(this.zonePrewarmHost(), zone, deadline);
-        const mobGroup = mobPrewarm.group;
-        const npcGroup = npcPrewarm.group;
+        const [mobs, npcs] = await buildZonePrewarmGroups(this.zonePrewarmHost(), zone, opts);
+        const mobGroup = mobs.group;
+        const npcGroup = npcs.group;
         // Hide before scene attachment. The shared GPU queue may be occupied by
         // sky/feature work for many frames before runBackgroundPrewarm starts.
         mobGroup.visible = false;
@@ -3996,8 +3995,8 @@ export class Renderer {
           // Only publish visuals to the live pool after the warm pass. Background
           // gameplay can otherwise take one out of its T-pose grid while the
           // prewarm awaits idle compile slots, leaving its shadow variant cold.
-          for (const item of mobPrewarm.pooled) this.pooledVisuals.store(item.key, item.visual);
-          for (const item of npcPrewarm.pooled) this.pooledVisuals.store(item.key, item.visual);
+          for (const item of mobs.pooled) this.pooledVisuals.store(item.key, item.visual);
+          for (const item of npcs.pooled) this.pooledVisuals.store(item.key, item.visual);
           this.lastZonePrewarmStats = {
             zoneId,
             buildMs: Math.round(tBuild - t0),
@@ -5192,6 +5191,7 @@ export class Renderer {
       templateIdsInZone: (zone, kind) => this.templateIdsInZone(zone, kind),
       prewarmedMobTemplates: this.prewarmedMobTemplates,
       prewarmedNpcModels: this.prewarmedNpcModels,
+      stopped: () => this.shutdownStarted,
     };
   }
 

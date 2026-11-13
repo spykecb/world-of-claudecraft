@@ -22,6 +22,12 @@
 
 import { runSlicedBuild } from './grass_build_slicer_core';
 
+/** The longest piece of an idle-sliced build per idle slot, and how long a
+ *  slot may be waited for under sustained frame load (the terrain lane's
+ *  values). Shared by every idle-sliced build lane. */
+export const IDLE_SLICE_MS = 6;
+export const IDLE_SLICE_TIMEOUT_MS = 200;
+
 /** A builder as a generator: yields between pieces of work, returns its result. */
 export type SteppedBuild<T> = Generator<void, T, void>;
 
