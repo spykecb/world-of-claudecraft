@@ -20,7 +20,7 @@ import {
 import { carryGeometryLod } from './assets/geometry_lod';
 import { loadGltf } from './assets/loader';
 import { registerDeferredPreload } from './assets/preload';
-import { buildDeckWood } from './deck_render';
+import { buildDeckWoodSteps } from './deck_render';
 import { GFX } from './gfx';
 import { activeWorldPromoted } from './promoted_scenery_gate';
 import { prepareSceneryGeometryLod } from './scenery_geometry_lod';
@@ -134,8 +134,16 @@ export interface Placement {
  * its exact (x, z), so a cliff face would throw it up the wall; isCliffFace
  * rejects those the same way it rejects the palm that carried them. */
 export function reachCoconutSpots(seed: number): Placement[] {
+  return drainBuild(reachCoconutSpotsSteps(seed));
+}
+
+/** reachCoconutSpots as a stepped build: yields after each palm (its cliff
+ *  checks sample the terrain several times per cluster; one call was a 19 ms
+ *  piece of the Palm Reach build). */
+export function* reachCoconutSpotsSteps(seed: number): SteppedBuild<Placement[]> {
   const spots: Placement[] = [];
   for (const sp of reachPalmSpots(seed)) {
+    yield;
     if (hash2(sp.x, sp.z, seed + 5301) > 0.55) continue;
     const n = 2 + Math.floor(hash2(sp.z, sp.x, seed + 5311) * 2);
     for (let k = 0; k < n; k++) {
@@ -304,7 +312,7 @@ export function* buildJungleFeaturesSteps(seed: number): SteppedBuild<JungleFeat
 
   // --- the fallen coconuts: clusters dropped around the palm trunks ---
   // Stands down when the document owns the coconut clusters as placements.
-  if (!promotedCoconuts) yield* instanceProp('coconuts', reachCoconutSpots(seed));
+  if (!promotedCoconuts) yield* instanceProp('coconuts', yield* reachCoconutSpotsSteps(seed));
 
   // --- the still water dressing: lily rafts and reeds on the lakes ---
   {
@@ -358,7 +366,7 @@ export function* buildJungleFeaturesSteps(seed: number): SteppedBuild<JungleFeat
   {
     const wood = mat(0x9a7f5e, 0.9);
     const postWood = mat(0x77604a, 0.92);
-    const { planks, posts } = buildDeckWood(
+    const { planks, posts } = yield* buildDeckWoodSteps(
       REACH_DECKS,
       (x, z) => terrainHeight(x, z, seed),
       WATER_LEVEL,

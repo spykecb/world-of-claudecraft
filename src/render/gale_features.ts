@@ -15,7 +15,7 @@ import { hash2 } from '../sim/rng';
 import { terrainHeight, WATER_LEVEL } from '../sim/world';
 import { loadGltf } from './assets/loader';
 import { registerDeferredPreload } from './assets/preload';
-import { beamBetween, buildDeckWood } from './deck_render';
+import { beamBetween, buildDeckWoodSteps } from './deck_render';
 import { GFX } from './gfx';
 import { drainBuild, type SteppedBuild } from './stepped_build_core';
 
@@ -181,7 +181,10 @@ export function* buildGaleFeaturesSteps(seed: number): SteppedBuild<GaleFeatures
         const w = balc ? 0.95 : 0.62;
         slab(s.x + Math.sin(a) * midR, s.z + Math.cos(a) * midR, w, outR - s.coreR, a);
         pier(a, outR, w);
+        // a piece per run of treads: the stair's boxes were the build's largest piece
+        if (i % 16 === 15) yield;
       }
+      yield;
       // the handrail: posts along the outer edge, and a continuous helical
       // double rail sampled finely so it runs DIAGONALLY up the flights and
       // levels off around each balcony
@@ -332,7 +335,7 @@ export function* buildGaleFeaturesSteps(seed: number): SteppedBuild<GaleFeatures
   {
     const wood = mat(0x8a6a4a, 0.9);
     const postWood = mat(0x6b523d, 0.92);
-    const { planks, posts } = buildDeckWood(
+    const { planks, posts } = yield* buildDeckWoodSteps(
       GLIDER_WHARF_DECKS,
       (x, z) => terrainHeight(x, z, seed),
       WATER_LEVEL,
