@@ -17,6 +17,7 @@
 // `zone:features:<name>`; a prebuild records each slice, so the ledger's
 // worst entry is the worst frame the build cost.
 
+import { buildFenFeaturesSteps } from './fen_features';
 import { idleSlot } from './idle_queue';
 import { buildRealmFloraSteps } from './realm_flora';
 import { runBuildInSlices, type SteppedBuild } from './stepped_build_core';
@@ -30,6 +31,7 @@ export const FEATURE_IDLE_TIMEOUT_MS = 200;
  *  times them under. */
 const STEPPED: Record<string, readonly [string, (seed: number) => SteppedBuild<unknown>][]> = {
   dusk: [['buildRealmFlora', (seed) => buildRealmFloraSteps(seed)]],
+  fen: [['buildFenFeatures', (seed) => buildFenFeaturesSteps(seed)]],
 };
 
 export interface ZoneFeatureBuildHost {

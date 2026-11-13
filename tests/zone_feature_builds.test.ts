@@ -3,7 +3,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 // A deterministic stand-in for the realm flora stepped build: PIECES pieces
 // of 2 ms each on the test clock, counting how often a build starts.
-const flora = vi.hoisted(() => ({ clock: { now: 0 }, starts: 0, pieces: 12 }));
+const flora = vi.hoisted(() => ({ clock: { now: 0 }, starts: 0, pieces: 12, fenStarts: 0 }));
+vi.mock('../src/render/fen_features', () => ({
+  *buildFenFeaturesSteps(seed: number) {
+    flora.fenStarts++;
+    yield;
+    return { group: { name: `fen-features:${seed}` } };
+  },
+}));
 vi.mock('../src/render/realm_flora', () => ({
   *buildRealmFloraSteps(seed: number) {
     flora.starts++;
@@ -104,9 +111,18 @@ describe('zone feature builds', () => {
     expect(builds.build('buildRealmFlora', () => 'rebuilt')).toBe('rebuilt');
   });
 
+  it('prebuilds the Willowfen dressing too', async () => {
+    const { builds } = lane();
+    await builds.prebuild('fen', 9);
+    expect(flora.fenStarts).toBe(1);
+    expect(builds.build('buildFenFeatures', () => 'one call')).toEqual({
+      group: { name: 'fen-features:9' },
+    });
+  });
+
   it('prebuilds nothing for a biome without stepped builders', async () => {
     const { builds, records } = lane();
-    await builds.prebuild('fen', 1);
+    await builds.prebuild('frost', 1);
     expect(records).toEqual([]);
   });
 
