@@ -969,12 +969,12 @@ import { surfaceDetailPrewarmTextures } from './worn_stone';
 import { buildYumiMaze, type YumiMazeView } from './yumi_maze';
 import { YumiTeamMarkers } from './yumi_team_markers';
 import { zonesEligibleForEviction } from './zone_eviction_core';
+import { ZoneFeatureBuilds } from './zone_feature_builds';
 import {
   sweepZoneFeatures,
   type ZoneFeatureEntry,
-  zoneFeatureEntryFor,
+  zoneFeatureEntriesFor,
 } from './zone_feature_sweep';
-import { hasUnseededInstanceMatrix } from './zone_feature_visibility_core';
 import {
   reportZonePrepare,
   type ZonePrewarmStats,
@@ -1592,6 +1592,10 @@ export class Renderer {
   private hitchLogEnabled = false;
   private readonly hitchAligner = createHitchFrameAligner();
   private readonly buildLedger = createBuildLedger(); // write-only, read via perfStats()
+  private readonly featureBuilds = new ZoneFeatureBuilds({
+    record: (kind, ms, atMs) => this.buildLedger.record(kind, ms, atMs),
+    stopped: () => this.shutdownStarted,
+  });
   // The census burst inflates the following frame's dt; skip that one sample
   // so the tracker never charges the census to the scene.
   private hitchSkipNextFrame = false;
@@ -3819,9 +3823,16 @@ export class Renderer {
       onProgress?.(5, 100);
       // Features consume the kit and must wait before attaching any model.
       if (kitLoad) await kitLoad;
-      this.lastAttachedFeatureGroups = [];
-      this.ensureZoneFeatures(zone);
-      const featureGroups = this.lastAttachedFeatureGroups.slice();
+      // Off the gating path a stepped builder (zone_feature_builds.ts) runs in
+      // idle slices BESIDE terrain, and the features attach once it is ready;
+      // a gating prepare attaches them now, as before.
+      const features = (async () => {
+        if (idlePace) await this.featureBuilds.prebuild(zone.biome, this.sim.cfg.seed);
+        this.lastAttachedFeatureGroups = [];
+        this.ensureZoneFeatures(zone);
+        return this.lastAttachedFeatureGroups.slice();
+      })();
+      void features.catch(() => {}); // joined below; see the sky lane note
       const terrainStarted = performance.now();
       await this.terrainView.ensureZone(
         zone,
@@ -3837,6 +3848,7 @@ export class Renderer {
       const waterMeshes = await this.waterView.ensureZone(zone, { pace: opts?.pace });
       for (const mesh of waterMeshes) freezeStaticMatrices(mesh);
       const waterDone = performance.now();
+      const featureGroups = await features;
       onProgress?.(96, 100);
       // A background prepare precompiles every program this zone just added
       // (water lakes, bespoke biome features), one idle slot apart: a program
@@ -4172,28 +4184,10 @@ export class Renderer {
     // for the frames until the next budget pass.
     for (const light of view.glowLights ?? []) this.fireLightAdopter.adopt(light);
     this.lastAttachedFeatureGroups.push(view.group);
-    // A view spanning several regions registers each child for the distance
-    // cull instead of the whole group: one world-wide footprint can never be
-    // culled (water-flora was 10.96M triangles submitted from every realm).
+    // Each cull child of a view spanning regions (zone_feature_sweep.ts).
     const registerCullGroups = (): void => {
-      for (const cullGroup of view.cullGroups ?? [view.group]) {
-        // Footprints are measured ONCE at attach, so an InstancedMesh whose
-        // matrices are still factory zeros poisons the measurement silently
-        // (the seabird flock parked a footprint at the world origin this way).
-        cullGroup.traverse((obj) => {
-          const inst = obj as THREE.InstancedMesh;
-          if (!inst.isInstancedMesh) return;
-          if (hasUnseededInstanceMatrix(inst.instanceMatrix.array, inst.count)) {
-            console.error(
-              `attachZoneFeature: "${cullGroup.name}" holds an InstancedMesh with unseeded ` +
-                'instance matrices; seed placements before attach or its cull footprint is wrong',
-            );
-          }
-        });
-        this.zoneFeatureGroups.push(
-          zoneFeatureEntryFor(cullGroup, measureFeatureFootprint(cullGroup)),
-        );
-      }
+      const groups = view.cullGroups ?? [view.group];
+      this.zoneFeatureGroups.push(...zoneFeatureEntriesFor(groups, measureFeatureFootprint));
     };
     if (!gate) {
       registerCullGroups();
@@ -4225,6 +4219,7 @@ export class Renderer {
   }
 
   private ensureZoneFeatures(zone: ZoneDef): void {
+    if (this.shutdownStarted) return;
     switch (zone.biome) {
       case 'dusk':
         if (!this.realmFlora) {
@@ -4295,13 +4290,10 @@ export class Renderer {
     }
   }
 
-  // Times one zone feature builder under `zone:features:<name>`; every builder
-  // takes the world seed (the seedless ones ignore it).
+  // One zone feature builder, timed under `zone:features:<name>`, or its idle
+  // prebuild (zone_feature_builds.ts); the seedless builders ignore the seed.
   private timedBuild<T>(name: string, build: (seed: number) => T): T {
-    const started = performance.now();
-    const built = build(this.sim.cfg.seed);
-    this.buildLedger.record(`zone:features:${name}`, performance.now() - started, started);
-    return built;
+    return this.featureBuilds.build(name, () => build(this.sim.cfg.seed));
   }
 
   /** Toggle biome-driven ambient precipitation (snow/rain). */

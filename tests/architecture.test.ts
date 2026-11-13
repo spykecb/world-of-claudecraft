@@ -1417,6 +1417,8 @@ const RENDER_PURE_CORES = [
   'src/render/environment_transition_core.ts',
   'src/render/ground_tilt_core.ts',
   'src/render/grass_build_slicer_core.ts',
+  // resumable zone feature builds stepped across idle slices (zone_feature_builds.ts)
+  'src/render/stepped_build_core.ts',
   'src/render/grass_cap_collapse_core.ts',
   'src/render/grass_tuft_cards_core.ts',
   'src/render/step_smooth_core.ts',

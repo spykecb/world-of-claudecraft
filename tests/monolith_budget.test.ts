@@ -1064,7 +1064,10 @@ const MONOLITHS: MonolithRow[] = [
     // Exact count.
     // First-person camera integration extracts the spatial-audio listener.
     // Keep the release branch ceiling ratcheted down by the same eight lines.
-    ceiling: 12193,
+    // Lowered after moving the zone feature cull-group registration into
+    // zone_feature_sweep.ts (zoneFeatureEntriesFor) beside the idle-sliced
+    // feature prebuild wiring (zone_feature_builds.ts). Exact count.
+    ceiling: 12180,
     seam: 'a new src/render/<thing>.ts module the renderer calls (src/render/CLAUDE.md)',
   },
   {
