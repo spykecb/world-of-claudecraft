@@ -18,7 +18,9 @@
 // worst entry is the worst frame the build cost.
 
 import { buildFenFeaturesSteps } from './fen_features';
+import { buildGaleFeaturesSteps } from './gale_features';
 import { idleSlot } from './idle_queue';
+import { buildJungleFeaturesSteps } from './jungle_features';
 import { buildRealmFloraSteps } from './realm_flora';
 import { runBuildInSlices, type SteppedBuild } from './stepped_build_core';
 
@@ -32,6 +34,8 @@ export const FEATURE_IDLE_TIMEOUT_MS = 200;
 const STEPPED: Record<string, readonly [string, (seed: number) => SteppedBuild<unknown>][]> = {
   dusk: [['buildRealmFlora', (seed) => buildRealmFloraSteps(seed)]],
   fen: [['buildFenFeatures', (seed) => buildFenFeaturesSteps(seed)]],
+  jungle: [['buildJungleFeatures', (seed) => buildJungleFeaturesSteps(seed)]],
+  gale: [['buildGaleFeatures', (seed) => buildGaleFeaturesSteps(seed)]],
 };
 
 export interface ZoneFeatureBuildHost {

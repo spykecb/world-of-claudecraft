@@ -3,7 +3,27 @@ import { describe, expect, it, vi } from 'vitest';
 
 // A deterministic stand-in for the realm flora stepped build: PIECES pieces
 // of 2 ms each on the test clock, counting how often a build starts.
-const flora = vi.hoisted(() => ({ clock: { now: 0 }, starts: 0, pieces: 12, fenStarts: 0 }));
+const flora = vi.hoisted(() => ({
+  clock: { now: 0 },
+  starts: 0,
+  pieces: 12,
+  fenStarts: 0,
+  otherStarts: [] as string[],
+}));
+vi.mock('../src/render/jungle_features', () => ({
+  *buildJungleFeaturesSteps(seed: number) {
+    flora.otherStarts.push('jungle');
+    yield;
+    return { group: { name: `jungle-features:${seed}` } };
+  },
+}));
+vi.mock('../src/render/gale_features', () => ({
+  *buildGaleFeaturesSteps(seed: number) {
+    flora.otherStarts.push('gale');
+    yield;
+    return { group: { name: `gale-features:${seed}` } };
+  },
+}));
 vi.mock('../src/render/fen_features', () => ({
   *buildFenFeaturesSteps(seed: number) {
     flora.fenStarts++;
@@ -117,6 +137,19 @@ describe('zone feature builds', () => {
     expect(flora.fenStarts).toBe(1);
     expect(builds.build('buildFenFeatures', () => 'one call')).toEqual({
       group: { name: 'fen-features:9' },
+    });
+  });
+
+  it('prebuilds the Palm Reach and Galecrest dressing too', async () => {
+    const { builds } = lane();
+    await builds.prebuild('jungle', 4);
+    await builds.prebuild('gale', 4);
+    expect(flora.otherStarts).toEqual(['jungle', 'gale']);
+    expect(builds.build('buildJungleFeatures', () => 'one call')).toEqual({
+      group: { name: 'jungle-features:4' },
+    });
+    expect(builds.build('buildGaleFeatures', () => 'one call')).toEqual({
+      group: { name: 'gale-features:4' },
     });
   });
 

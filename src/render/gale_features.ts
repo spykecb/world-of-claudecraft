@@ -17,6 +17,7 @@ import { loadGltf } from './assets/loader';
 import { registerDeferredPreload } from './assets/preload';
 import { beamBetween, buildDeckWood } from './deck_render';
 import { GFX } from './gfx';
+import { drainBuild, type SteppedBuild } from './stepped_build_core';
 
 // The lighthouse, bottom to top: four crenellated grey body drums (each
 // seated into the battlement ring of the one below, so the shaft reads as
@@ -84,6 +85,14 @@ function mergeBoxes(parts: THREE.BufferGeometry[], material: THREE.Material): TH
 }
 
 export function buildGaleFeatures(seed: number): GaleFeaturesView {
+  return drainBuild(buildGaleFeaturesSteps(seed));
+}
+
+/** buildGaleFeatures as a stepped build (stepped_build_core.ts): yields per
+ *  tower drum and between the stair, the beam, the wrecks and the pier, so
+ *  the renderer's streaming prepare spreads Galecrest over idle slices instead
+ *  of one long frame (zone_feature_builds.ts). */
+export function* buildGaleFeaturesSteps(seed: number): SteppedBuild<GaleFeaturesView> {
   const group = new THREE.Group();
   group.name = 'gale-features';
   const glowLights: THREE.PointLight[] = [];
@@ -94,6 +103,7 @@ export function buildGaleFeatures(seed: number): GaleFeaturesView {
   {
     let lift = 0;
     for (let i = 0; i < TOWER_STACK.length; i++) {
+      yield;
       const scene = towerScenes[i];
       if (!scene) continue;
       const drum = scene.clone(true);
@@ -111,6 +121,7 @@ export function buildGaleFeatures(seed: number): GaleFeaturesView {
       lift += TOWER_STACK[i].h;
     }
     const lampY = beaconY + lift - 3.5;
+    yield;
     // the stone stair, two flights and two C balconies: drawn from the SAME
     // beaconSpiralLift samples the sim walks on, so deck and footing never
     // disagree
@@ -228,6 +239,7 @@ export function buildGaleFeatures(seed: number): GaleFeaturesView {
       group.add(mergeBoxes(slabs, stone));
       group.add(mergeBoxes(rails, iron));
     }
+    yield;
     // the turning light: two opposed additive cones riding a pivot. Real-beam
     // treatment: per-vertex alpha runs each cone from a hot core at the lamp
     // to nothing at its mouth, so the beam melts into the night instead of
@@ -274,6 +286,7 @@ export function buildGaleFeatures(seed: number): GaleFeaturesView {
     group.add(light);
   }
 
+  yield;
   // --- the Wreckfields: hull ribs arcing out of the shingle ---
   {
     const ribGeo = new THREE.TorusGeometry(1, 0.08, 5, 10, Math.PI);
@@ -312,6 +325,7 @@ export function buildGaleFeatures(seed: number): GaleFeaturesView {
     group.add(mesh);
   }
 
+  yield;
   // Zephyr's pier on the existing western mountain. Shared rectangles keep
   // the visible planks and walkable deck aligned.
   const updraftGroup = new THREE.Group();
