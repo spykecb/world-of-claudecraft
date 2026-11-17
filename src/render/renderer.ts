@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { detectBrowserEngine } from '../game/browser_env';
 import { CAM_PITCH_UP } from '../game/input';
 import { NumberSampleRing } from '../game/sample_ring';
 import { coerceFxTier, nameplateIntervalSec, nameplatePixelRatio } from '../game/ui_tier_knobs';
@@ -272,7 +273,13 @@ import { fogFarForBuiltGround, groundViewConeHalfAngle } from './chunk_residency
 import { buildCityClutter, type CityClutterView } from './city_clutter';
 import { CLICK_MARKER_LIFETIME } from './click_marker';
 import { buildCliffScree, type CliffScreeView } from './cliff_scree';
-import { type CompileArmHost, linkColorPrograms, linkShadowPrograms } from './compile_arms';
+import {
+  type CompileArmHost,
+  linkColorPrograms,
+  linkShadowPrograms,
+  releaseCompileArmLinkPacing,
+  setCompileArmLinkPacing,
+} from './compile_arms';
 import type { CompileGateResult } from './compile_gate';
 import { CompileGateQueue, SerialGateLane, settlePendingSwap } from './compile_gate';
 import { linkPieceWork } from './compile_gate_pieces';
@@ -518,6 +525,9 @@ import { buildJungleFeatures, type JungleFeaturesView } from './jungle_features'
 import { legendaryRegaliaActive, legendaryRegaliaEmitDt } from './legendary_regalia_core';
 import { stepLichHeartbeat } from './lich_audio_state_core';
 import { LightPulses, lightPulsePoolSize } from './light_pulses';
+import { awaitLinkFence, linkFenceStats } from './link_fence_proof';
+import { armLinkPacing, linkPacingStats } from './link_frame_ledger';
+import { type LinkGateMode, resolveLinkGateMode } from './link_gate_mode_core';
 import {
   createPrewarmPacing,
   markPrewarmPacingReveal,
@@ -736,6 +746,8 @@ import {
 } from './render_budget';
 import {
   gpuPrepMode,
+  linkFenceDisabled,
+  linkGateOverride,
   postShedLevelPin,
   renderLayerDisabled,
   resolutionEffectProbeEnabled,
@@ -956,12 +968,12 @@ import { surfaceDetailPrewarmTextures } from './worn_stone';
 import { buildYumiMaze, type YumiMazeView } from './yumi_maze';
 import { YumiTeamMarkers } from './yumi_team_markers';
 import { zonesEligibleForEviction } from './zone_eviction_core';
+import { ZoneFeatureBuilds } from './zone_feature_builds';
 import {
   sweepZoneFeatures,
   type ZoneFeatureEntry,
-  zoneFeatureEntryFor,
+  zoneFeatureEntriesFor,
 } from './zone_feature_sweep';
-import { hasUnseededInstanceMatrix } from './zone_feature_visibility_core';
 import {
   reportZonePrepare,
   type ZonePrewarmStats,
@@ -973,6 +985,7 @@ import {
   buildNpcPrewarmGroup,
   buildObjectPrewarmGroup,
   buildPlayerPrewarmGroup,
+  buildZonePrewarmGroups,
   PREWARM_MOB_POOL_COPIES,
   PREWARM_OBJECT_ITEM_IDS,
   PREWARM_OBJECT_POOL_COPIES,
@@ -1579,6 +1592,10 @@ export class Renderer {
   private hitchLogEnabled = false;
   private readonly hitchAligner = createHitchFrameAligner();
   private readonly buildLedger = createBuildLedger(); // write-only, read via perfStats()
+  private readonly featureBuilds = new ZoneFeatureBuilds({
+    record: (kind, ms, atMs) => this.buildLedger.record(kind, ms, atMs),
+    stopped: () => this.shutdownStarted,
+  });
   // The census burst inflates the following frame's dt; skip that one sample
   // so the tracker never charges the census to the scene.
   private hitchSkipNextFrame = false;
@@ -1984,6 +2001,9 @@ export class Renderer {
   // KHR_parallel_shader_compile present: lets us link new programs off-thread and
   // gate a freshly-streamed view's draw on readiness instead of stalling the frame.
   private asyncCompileSupported = false;
+  // The first-sight gates also run without it, deferred, on Chromium (link_gate_mode_core.ts).
+  private compileGatesSupported = false;
+  private linkGateMode: LinkGateMode = 'none';
   private readonly liveCompileGates = new CompileGateQueue(this.backgroundGpuWork);
   vfx: Vfx;
   // Thornhollow Fields flag/rune per-frame dressing + transition bursts; runs off
@@ -2280,11 +2300,19 @@ export class Renderer {
     // The context's whole extension set, enabled before the first program links
     // (renderer_extensions.ts); view draws gate on compileAsync only off-thread.
     try {
-      this.asyncCompileSupported =
-        typeof this.webgl.compileAsync === 'function' &&
-        enableAndWatchRendererExtensions(this.webgl).parallelCompile;
+      this.linkGateMode = resolveLinkGateMode({
+        compileAsync: typeof this.webgl.compileAsync === 'function',
+        parallelExtension: enableAndWatchRendererExtensions(this.webgl).parallelCompile,
+        engine: detectBrowserEngine(navigator.userAgent).engine,
+        override: linkGateOverride(),
+      });
+      this.asyncCompileSupported = this.linkGateMode === 'parallel';
+      this.compileGatesSupported = this.linkGateMode !== 'none';
+      setCompileArmLinkPacing(this.linkGateMode === 'deferred', this, !linkFenceDisabled());
     } catch {
       this.asyncCompileSupported = false;
+      this.compileGatesSupported = false;
+      setCompileArmLinkPacing(false, this);
     }
     // Vista tiers push the far plane out to the whole-world envelope so the
     // far mesh has room; the classic 950 stays wherever the vista is off.
@@ -2628,7 +2656,7 @@ export class Renderer {
     setRenderCategory(this.fish.group, 'fish');
     this.scene.add(this.fish.group);
     this.fish.setCompileGate(
-      this.asyncCompileSupported ? (root: THREE.Object3D) => this.compileGate(root) : null,
+      this.compileGatesSupported ? (root: THREE.Object3D) => this.compileGate(root) : null,
     );
     this.motes = buildMotes(this.sim.cfg.seed);
     setRenderCategory(this.motes.group, 'ambient');
@@ -2729,7 +2757,7 @@ export class Renderer {
     // A key's soft deadline comes from the budget's learned reveal cost: past
     // it the gate reports how much of the key linked and keeps waiting, so
     // only the hard watchdog ever reveals an unlinked root (reveal_gate.ts).
-    if (this.asyncCompileSupported) {
+    if (this.compileGatesSupported) {
       const revealHost = createRevealCompileHost({
         gate: (pieces, options, firstIndex) =>
           this.liveCompileGates.runPieces(pieces, VIEW_COMPILE_GATE_MAX_MS, options, firstIndex),
@@ -2789,8 +2817,7 @@ export class Renderer {
     // Crafting-station scenery (Professions 2.0): static, except the kitchens
     // fire, whose flame + light join the campfire flicker/ember pass above.
     const stationProps = buildStationProps(this.sim.cfg.seed, this.sim.stationPlacements);
-    setRenderCategory(stationProps.group, 'props');
-    this.scene.add(stationProps.group);
+    this.attachZoneFeature(stationProps, false); // a fog-cull group per hub cell, no band bake
     freezeStaticMatrices(stationProps.group);
     for (const flame of stationProps.flames) flame.matrixAutoUpdate = true;
     this.flames.push(...stationProps.flames);
@@ -2800,8 +2827,7 @@ export class Renderer {
     // The garden beds and compost bins: static world furniture EVERY viewer
     // sees, whatever they have planted (the per-viewer crops mount later).
     const farmPatchProps = buildFarmPatchProps(this.sim.cfg.seed, this.sim.farmPatches);
-    setRenderCategory(farmPatchProps.group, 'props');
-    this.scene.add(farmPatchProps.group);
+    this.attachZoneFeature(farmPatchProps, false); // a fog-cull group per patch, no band bake
     freezeStaticMatrices(farmPatchProps.group);
     this.farmBedSeats = farmPatchProps.seats;
     bd('stations');
@@ -3092,7 +3118,7 @@ export class Renderer {
       this.scene,
       this.farmBedSeats,
       this.vfx,
-      this.asyncCompileSupported
+      this.compileGatesSupported
         ? (root, label, priority) => this.compileGate(root, false, label, priority)
         : null,
     );
@@ -3110,7 +3136,7 @@ export class Renderer {
       pixelRatio: () => this.webgl.getPixelRatio(), reducedMotion: () => this.reducedMotion(),
       audio: () => this.audioSink, light: this.lightPulses,
       spiritBuild: (build) => this.queueSpiritPuppetBuild(build),
-      compile: this.asyncCompileSupported ? (root) => this.compileGate(root) : null,
+      compile: this.compileGatesSupported ? (root) => this.compileGate(root) : null,
       castGate: this.castVfxReadiness,
       painter: {
         spawnAoeRing: (x, z, r, school, color) => this.spawnAoeRing(x, z, r, school, color),
@@ -3797,9 +3823,16 @@ export class Renderer {
       onProgress?.(5, 100);
       // Features consume the kit and must wait before attaching any model.
       if (kitLoad) await kitLoad;
-      this.lastAttachedFeatureGroups = [];
-      this.ensureZoneFeatures(zone);
-      const featureGroups = this.lastAttachedFeatureGroups.slice();
+      // Off the gating path a stepped builder (zone_feature_builds.ts) runs in
+      // idle slices BESIDE terrain, and the features attach once it is ready;
+      // a gating prepare attaches them now, as before.
+      const features = (async () => {
+        if (idlePace) await this.featureBuilds.prebuild(zone.biome, this.sim.cfg.seed);
+        this.lastAttachedFeatureGroups = [];
+        this.ensureZoneFeatures(zone);
+        return this.lastAttachedFeatureGroups.slice();
+      })();
+      void features.catch(() => {}); // joined below; see the sky lane note
       const terrainStarted = performance.now();
       await this.terrainView.ensureZone(
         zone,
@@ -3815,6 +3848,7 @@ export class Renderer {
       const waterMeshes = await this.waterView.ensureZone(zone, { pace: opts?.pace });
       for (const mesh of waterMeshes) freezeStaticMatrices(mesh);
       const waterDone = performance.now();
+      const featureGroups = await features;
       onProgress?.(96, 100);
       // A background prepare precompiles every program this zone just added
       // (water lakes, bespoke biome features), one idle slot apart: a program
@@ -3897,12 +3931,10 @@ export class Renderer {
       opts?.background === true,
       async (pacing) => {
         const zone = dungeon ? ({ ...zoneAt(x, z), id: zoneId } as ZoneDef) : zoneAt(x, z);
-        const deadline = performance.now() + 5000;
         const t0 = performance.now();
-        const mobPrewarm = buildEntityPrewarmGroup(this.zonePrewarmHost(), zone);
-        const npcPrewarm = buildNpcPrewarmGroup(this.zonePrewarmHost(), zone, deadline);
-        const mobGroup = mobPrewarm.group;
-        const npcGroup = npcPrewarm.group;
+        const [mobs, npcs] = await buildZonePrewarmGroups(this.zonePrewarmHost(), zone, opts);
+        const mobGroup = mobs.group;
+        const npcGroup = npcs.group;
         // Hide before scene attachment. The shared GPU queue may be occupied by
         // sky/feature work for many frames before runBackgroundPrewarm starts.
         mobGroup.visible = false;
@@ -3962,8 +3994,8 @@ export class Renderer {
           // Only publish visuals to the live pool after the warm pass. Background
           // gameplay can otherwise take one out of its T-pose grid while the
           // prewarm awaits idle compile slots, leaving its shadow variant cold.
-          for (const item of mobPrewarm.pooled) this.pooledVisuals.store(item.key, item.visual);
-          for (const item of npcPrewarm.pooled) this.pooledVisuals.store(item.key, item.visual);
+          for (const item of mobs.pooled) this.pooledVisuals.store(item.key, item.visual);
+          for (const item of npcs.pooled) this.pooledVisuals.store(item.key, item.visual);
           this.lastZonePrewarmStats = {
             zoneId,
             buildMs: Math.round(tBuild - t0),
@@ -4150,28 +4182,10 @@ export class Renderer {
     // for the frames until the next budget pass.
     for (const light of view.glowLights ?? []) this.fireLightAdopter.adopt(light);
     this.lastAttachedFeatureGroups.push(view.group);
-    // A view spanning several regions registers each child for the distance
-    // cull instead of the whole group: one world-wide footprint can never be
-    // culled (water-flora was 10.96M triangles submitted from every realm).
+    // Each cull child of a view spanning regions (zone_feature_sweep.ts).
     const registerCullGroups = (): void => {
-      for (const cullGroup of view.cullGroups ?? [view.group]) {
-        // Footprints are measured ONCE at attach, so an InstancedMesh whose
-        // matrices are still factory zeros poisons the measurement silently
-        // (the seabird flock parked a footprint at the world origin this way).
-        cullGroup.traverse((obj) => {
-          const inst = obj as THREE.InstancedMesh;
-          if (!inst.isInstancedMesh) return;
-          if (hasUnseededInstanceMatrix(inst.instanceMatrix.array, inst.count)) {
-            console.error(
-              `attachZoneFeature: "${cullGroup.name}" holds an InstancedMesh with unseeded ` +
-                'instance matrices; seed placements before attach or its cull footprint is wrong',
-            );
-          }
-        });
-        this.zoneFeatureGroups.push(
-          zoneFeatureEntryFor(cullGroup, measureFeatureFootprint(cullGroup)),
-        );
-      }
+      const groups = view.cullGroups ?? [view.group];
+      this.zoneFeatureGroups.push(...zoneFeatureEntriesFor(groups, measureFeatureFootprint));
     };
     if (!gate) {
       registerCullGroups();
@@ -4203,6 +4217,7 @@ export class Renderer {
   }
 
   private ensureZoneFeatures(zone: ZoneDef): void {
+    if (this.shutdownStarted) return;
     switch (zone.biome) {
       case 'dusk':
         if (!this.realmFlora) {
@@ -4273,13 +4288,10 @@ export class Renderer {
     }
   }
 
-  // Times one zone feature builder under `zone:features:<name>`; every builder
-  // takes the world seed (the seedless ones ignore it).
+  // One zone feature builder, timed under `zone:features:<name>`, or its idle
+  // prebuild (zone_feature_builds.ts); the seedless builders ignore the seed.
   private timedBuild<T>(name: string, build: (seed: number) => T): T {
-    const started = performance.now();
-    const built = build(this.sim.cfg.seed);
-    this.buildLedger.record(`zone:features:${name}`, performance.now() - started, started);
-    return built;
+    return this.featureBuilds.build(name, () => build(this.sim.cfg.seed));
   }
 
   /** Toggle biome-driven ambient precipitation (snow/rain). */
@@ -4493,6 +4505,7 @@ export class Renderer {
       renderDiagnostics: this.lastFrameStats.renderDiagnostics,
       lastFrame: snapshotRendererFrameStats(this.lastFrameStats),
       prewarm: this.lastPrewarmStats,
+      linkGate: { mode: this.linkGateMode, ...linkPacingStats(), fence: linkFenceStats() },
       castVfx: this.castVfxReadiness.snapshot(),
       entryDetailHorizon: this.entryDetailHorizon.snapshot(),
       gpuQueue: this.backgroundGpuWork.stats(),
@@ -4504,12 +4517,13 @@ export class Renderer {
     };
   }
 
-  /** Diagnostic-only lifecycle boundary, called immediately before curtain fade. */
+  /** A world reveal, right before the curtain fades: diagnostics and link pacing arm. */
   markGpuHitchReveal(): void {
     this.renderBudgetGovernor.noteReveal();
     this.gpuHitchCompileLifecycle?.markReveal();
     markPrewarmPacingReveal(this.gpuHitchPacing, this.lastPrewarmStats);
     liveProgramWatch.armLiveProgramWatch(this.webgl);
+    armLinkPacing();
   }
 
   /** Contract the entry-only detail field while the loading cover still owns presentation. */
@@ -4921,7 +4935,7 @@ export class Renderer {
   private readonly farBakeGate: FarBakeGate = (target, onSettled) =>
     this.farBakeLane.enqueue(
       (settled) => this.gateSwapFlagOnCompile(target, settled),
-      () => onSettled(compileProof(this.asyncCompileSupported, this.webgl, target)),
+      () => onSettled(compileProof(this.compileGatesSupported, this.webgl, target)),
     );
 
   /** buildFormVisual as one stable callback (no per-frame closure). */
@@ -5179,6 +5193,7 @@ export class Renderer {
       templateIdsInZone: (zone, kind) => this.templateIdsInZone(zone, kind),
       prewarmedMobTemplates: this.prewarmedMobTemplates,
       prewarmedNpcModels: this.prewarmedNpcModels,
+      stopped: () => this.shutdownStarted,
     };
   }
 
@@ -5257,7 +5272,7 @@ export class Renderer {
         return this.prewarmRenderTarget;
       },
       depthMaterials: () => this.prewarmDepthMaterials,
-      shadowArm: () => GFX.dynamicShadows && this.asyncCompileSupported,
+      shadowArm: () => GFX.dynamicShadows && this.compileGatesSupported,
     };
     this.compileArmHost = host;
     return host;
@@ -5435,6 +5450,7 @@ export class Renderer {
     const policy: PrewarmPolicy = resolvePrewarmPolicy({
       constrainedMemory: GFX.constrainedMemory,
       asyncCompileSupported: this.asyncCompileSupported,
+      deferredLinkCompile: this.linkGateMode === 'deferred',
       lowGfx: this.lowGfx,
       finishFullManifestBeforeReveal: GFX.tier === 'insane' && !GFX.constrainedMemory,
       defaultMaxMs: VIEW_PREWARM_MAX_MS,
@@ -5606,6 +5622,7 @@ export class Renderer {
     this.gpuHitchCompileLifecycle = compileLifecycle;
     let vfxPrewarmBursts = 0;
     let compileMode: RendererPrewarmStats['compileMode'] = 'none';
+    let fenceDetail = '';
     let compileMs = 0;
     let compileTimedOut = false;
     const budgetVariantStats: NonNullable<RendererPrewarmManifestEntryStats['budgetVariants']> = [];
@@ -5673,6 +5690,7 @@ export class Renderer {
         playerZ: this.sim.player.pos.z,
         batchSize: compileBatchRoots,
         sharedDedupe: compileDedupe,
+        // A bulk lane once resumed: in deferred mode a waiting gate links first.
         compileColor: (root) => this.compilePrewarmColorPrograms(root, false),
         compileShadow: (root) => this.compileShadowPrograms(root),
         onCompiledRoot: () => compiledPrewarmRoots++,
@@ -6298,7 +6316,7 @@ export class Renderer {
         priority: 46,
         required: false,
         run: async () => {
-          if (policy.skipMonolithCompile || !this.asyncCompileSupported) return;
+          if (policy.skipMonolithCompile || !this.compileGatesSupported) return;
           await submitCompileUnits(false, gpuSubmitDeadline, 'programs.compile-submit');
         },
         detail: () =>
@@ -6634,7 +6652,10 @@ export class Renderer {
         // a synchronous traversal, so the live resume lane must never receive
         // this.scene or another whole manifest entry.
         resumeUnits: () => {
-          if (!this.asyncCompileSupported || !this.webgl.compileAsync) return [];
+          // Deferred mode resumes too: the queue admits its units at one linking
+          // compile per frame (link_frame_ledger.ts), so the static scene the
+          // camera has not faced yet links before the first turn.
+          if (!this.compileGatesSupported || !this.webgl.compileAsync) return [];
           deferPoolPublication = poolsAwaitPublication();
           // Already-submitted groups are in flight off-thread; resuming them
           // would double-submit every unit. Only the never-submitted remainder
@@ -6712,6 +6733,14 @@ export class Renderer {
             sleep(budgetMs).then(() => 'timeout' as const),
           ]);
           if (outcome === 'timeout') compileTimedOut = true;
+          // Deferred mode: the units settled on three's unconditional true while their
+          // links still queue in the GPU process. One fence behind them all lands that
+          // backlog under the cover, bounded like the race above (link_fence_proof.ts).
+          if (this.linkGateMode === 'deferred' && !linkFenceDisabled()) {
+            const fenceBudgetMs = Math.max(0, compileAwaitDeadline - performance.now());
+            const fence = await awaitLinkFence(this.webgl.getContext(), undefined, fenceBudgetMs);
+            fenceDetail = `;fence=${fence.proved ? 'proved' : 'unproved'}:${roundMs(fence.waitedMs)}`;
+          }
           compileMs = roundMs(performance.now() - compileStart);
           compileTimedOut ||= compileMs > policy.compileMaxMs;
         },
@@ -6731,6 +6760,7 @@ export class Renderer {
             : null,
         detail: () =>
           `mode=${compileMode};timedOut=${compileTimedOut};compileRoots=${compiledPrewarmRoots}` +
+          fenceDetail +
           (compileUnitsDropped > 0 ? `;deferred=${compileUnitsDropped}` : ''),
       },
       {
@@ -7096,7 +7126,7 @@ export class Renderer {
         `views=${stats.createdViews}/${stats.candidateViews} ` +
         `programs=${stats.programsBefore}->${stats.programsAfter} ` +
         `textures=${stats.texturesBefore}->${stats.texturesAfter} uploads=${stats.textureUploads} ` +
-        `compile=${stats.compileMode}/${stats.compileMs}ms parallelCompile=${this.asyncCompileSupported} ` +
+        `compile=${stats.compileMode}/${stats.compileMs}ms parallelCompile=${this.asyncCompileSupported} linkGate=${this.linkGateMode} ` +
         `skipped=${stats.manifestSkipped} partial=[${stats.partialEntryIds.join(',')}] ` +
         `timedOut=[${stats.timedOutEntryIds.join(',')}] ` +
         `failed=[${stats.failedEntryIds.join(',')}]`,
@@ -8307,7 +8337,7 @@ export class Renderer {
     visibilityTarget: THREE.Object3D = group,
     requiredForEntry = false,
   ): Promise<void> | null {
-    if (!this.asyncCompileSupported) return null;
+    if (!this.compileGatesSupported) return null;
     const generation = this.lifecycleGeneration;
     const priorVisibility = visibilityTarget.visible;
     const gatesOnlyCharacterRig = visibilityTarget !== group;
@@ -8346,7 +8376,7 @@ export class Renderer {
   // payload, once attached, is left alone); for one the per-frame loop
   // recomputes every tick, use gateSwapFlagOnCompile instead.
   private gateSwapOnCompile(target: THREE.Object3D): void {
-    if (!this.asyncCompileSupported || !target.visible) return;
+    if (!this.compileGatesSupported || !target.visible) return;
     const generation = this.lifecycleGeneration;
     target.visible = false;
     void this.compileGate(target).then(
@@ -8372,7 +8402,7 @@ export class Renderer {
   // run when the gate is a no-op (unsupported browser): otherwise the flag is
   // permanently stuck true and the target stays hidden forever.
   private gateSwapFlagOnCompile(target: THREE.Object3D, onSettled: () => void): void {
-    if (!this.asyncCompileSupported) {
+    if (!this.compileGatesSupported) {
       onSettled();
       return;
     }
@@ -8706,7 +8736,7 @@ export class Renderer {
       this.lowGfx,
       this.flames,
       this.fireLightAdopter.sink,
-      this.asyncCompileSupported ? (target) => this.compileGate(target) : undefined,
+      this.compileGatesSupported ? (target) => this.compileGate(target) : undefined,
       // The raw registry + rank hook, for the world editor's keyed interior
       // rebuild only (see the DungeonInteriors constructor): a release has to
       // splice, which the append-only sink above cannot express.
@@ -9377,7 +9407,7 @@ export class Renderer {
    *  Only visibility flags, so this is cheap enough for the per-frame block. */
   /** The gate a streamed world group attaches through; none without parallel compile. */
   worldCompileGate(): ((target: THREE.Object3D) => Promise<unknown>) | undefined {
-    return this.asyncCompileSupported ? (target) => this.compileGate(target) : undefined;
+    return this.compileGatesSupported ? (target) => this.compileGate(target) : undefined;
   }
 
   /** What battleground_views.ts needs to build and attach a field copy. Its lights
@@ -11892,6 +11922,8 @@ export class Renderer {
   /** Release host-owned workers, overlay canvases, and document listeners. */
   dispose(): void {
     setBuildSpanSink(null);
+    // Stand the deferred link pacing down (link_frame_ledger.ts).
+    releaseCompileArmLinkPacing(this);
     this.cancelTerrainStreaming();
     this.localVisuals.dispose();
     this.nameplatePainter.dispose();
